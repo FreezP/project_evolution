@@ -1,7 +1,5 @@
-.venv/
-pyproject.toml
-uv.lock
-.python-version
-Thrower.gif
-Thrower.npy
-solution.json
+*
+!evogym.ipynb
+!gif.ipynb
+!main.py
+!main2.py
