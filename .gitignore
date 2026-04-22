@@ -1,0 +1,7 @@
+.venv/
+pyproject.toml
+uv.lock
+.python-version
+Thrower.gif
+Thrower.npy
+solution.json
