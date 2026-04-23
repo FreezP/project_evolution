@@ -1,3 +1,7 @@
+"""
+Evolution Strategies on Evogym environments.
+Optimizes a neural network controller for a given robot morphology.
+"""
 from evogym import sample_robot
 import torch
 import torch.nn as nn
@@ -8,58 +12,71 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 import gymnasium as gym
 import evogym.envs
-from evogym import sample_robot
 from evogym.utils import get_full_connectivity
 from tqdm import tqdm
 import imageio
+import multiprocessing as mp
+
 
 class Network(nn.Module):
-    def __init__(self, n_in, h_size, n_out):
+    """Feedforward network with optional LayerNorm, Xavier init."""
+    def __init__(self, n_in, h_size, n_out, use_layernorm=True):
         super().__init__()
+        self.use_layernorm = use_layernorm
         self.fc1 = nn.Linear(n_in, h_size)
         self.fc2 = nn.Linear(h_size, h_size)
         self.fc3 = nn.Linear(h_size, n_out)
+        if use_layernorm:
+            self.ln1 = nn.LayerNorm(h_size)
+            self.ln2 = nn.LayerNorm(h_size)
+        self.reset_parameters()
 
-        self.n_out = n_out
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def reset(self):
         pass
 
     def forward(self, x):
         x = self.fc1(x)
+        if self.use_layernorm:
+            x = self.ln1(x)
         x = F.relu(x)
-
         x = self.fc2(x)
+        if self.use_layernorm:
+            x = self.ln2(x)
         x = F.relu(x)
-
         x = self.fc3(x)
         return x
 
+
 class Agent:
-    def __init__(self, Net, config, genes = None):
+    """Encapsulates a neural network controller, its parameters, and fitness."""
+    def __init__(self, Net, config, genes=None):
         self.config = config
         self.Net = Net
         self.model = None
         self.fitness = None
-
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu")
-
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.make_network()
         if genes is not None:
             self.genes = genes
 
-    def __repr__(self):  # pragma: no cover
+    def __repr__(self):
         return f"Agent {self.model} > fitness={self.fitness}"
 
-    def __str__(self):  # pragma: no cover
+    def __str__(self):
         return self.__repr__()
 
     def make_network(self):
         n_in = self.config["n_in"]
         h_size = self.config["h_size"]
         n_out = self.config["n_out"]
-        self.model = self.Net(n_in, h_size, n_out).to(self.device).double()
+        use_ln = self.config.get("use_layernorm", True)
+        self.model = self.Net(n_in, h_size, n_out, use_layernorm=use_ln).to(self.device).float()
         return self
 
     @property
@@ -69,88 +86,90 @@ class Agent:
         with torch.no_grad():
             params = self.model.parameters()
             vec = torch.nn.utils.parameters_to_vector(params)
-        return vec.cpu().double().numpy()
+        return vec.cpu().float().numpy()
 
     @genes.setter
     def genes(self, params):
         if self.model is None:
             self.make_network()
-        assert len(params) == len(
-            self.genes), "Genome size does not fit the network size"
-        if np.isnan(params).any():
-            raise
+        params = np.clip(params, -10.0, 10.0)
         a = torch.tensor(params, device=self.device)
         torch.nn.utils.vector_to_parameters(a, self.model.parameters())
-        self.model = self.model.to(self.device).double()
+        self.model = self.model.to(self.device).float()
         self.fitness = None
         return self
 
-    def mutate_ga(self):
-        genes = self.genes
-        n = len(genes)
-        f = np.random.choice([False, True], size=n, p=[1/n, 1-1/n])
-
-        new_genes = np.empty(n)
-        new_genes[f] = genes[f]
-        noise = np.random.randn(n-sum(f))
-        new_genes[~f] = noise
-        return new_genes
-
     def act(self, obs):
-        # continuous actions
         with torch.no_grad():
-            x = torch.tensor(obs).double().unsqueeze(0).to(self.device)
+            x = torch.tensor(obs).float().unsqueeze(0).to(self.device)
             actions = self.model(x).cpu().detach().numpy()
         return actions
 
 
-walker = np.array([
+robot_config = np.array([
+    [1, 3, 3, 3, 1],
+    [4, 4, 1, 4, 4],
+    [0, 4, 2, 4, 0],
+    [4, 4, 2, 4, 4],
+    [4, 3, 3, 3, 4]
+])
+
+'Walker:'
+''' np.array([
     [3, 3, 3, 3, 3],
     [3, 3, 3, 3, 3],
-    [4, 4, 0, 4, 4],
-    [4, 4, 0, 4, 4],
-    [4, 4, 0, 4, 4]
-    ])
+    [3, 3, 0, 3, 3],
+    [3, 3, 0, 3, 3],
+    [1, 1, 0, 1, 1]
+])'''
+
+'Thrower:'
+''' np.array([
+    [0, 0, 1, 1, 1],
+    [1, 0, 4, 4, 4],
+    [4, 0, 4, 4, 4],
+    [4, 0, 4, 4, 4],
+    [3, 3, 3, 1, 1]
+])'''
+
 
 def make_env(env_name, seed=None, robot=None, **kwargs):
+    """Create an Evolution Gym environment, optionally with a custom robot body."""
     if robot is None:
-        # Pass kwargs here so render_mode="rgb_array" is actually used
         env = gym.make(env_name, **kwargs)
     else:
-        connections = get_full_connectivity(robot)
-        # Pass kwargs here as well
         env = gym.make(env_name, body=robot, **kwargs)
     env.robot = robot
     if seed is not None:
-        # Note: .seed() is deprecated in newer Gym versions, but kept for compatibility here
-        env.seed(seed)
-
+        env.reset(seed=seed)
     return env
 
 
 def evaluate(agent, env, max_steps=500, render=False):
-    obs, i = env.reset()
+    """Run one episode and return total reward (and optionally frames for a GIF)."""
+    obs, _ = env.reset()
     agent.model.reset()
-    reward = 0
+    total_reward = 0
     steps = 0
     done = False
-    if render:
-        imgs = []
+    imgs = [] if render else None
     while not done and steps < max_steps:
         if render:
-            img = env.render()  # mode='img'
+            img = env.render()
             imgs.append(img)
         action = agent.act(obs)
-        obs, r, done, trunc, _ = env.step(action)
-        reward += r
+        obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        total_reward += reward
         steps += 1
-
     if render:
-        return reward, imgs
-    return reward
+        return total_reward, imgs
+    return total_reward
+
 
 def get_cfg(env_name, robot=None):
-    env = make_env(env_name, robot=walker)
+    """Derive controller configuration from environment observation/action spaces."""
+    env = make_env(env_name, robot=robot_config)
     cfg = {
         "n_in": env.observation_space.shape[0],
         "h_size": 32,
@@ -159,108 +178,140 @@ def get_cfg(env_name, robot=None):
     env.close()
     return cfg
 
-env_name = 'Walker-v0'
-robot = walker
 
-cfg = get_cfg(env_name, robot)
-a = Agent(Network, cfg)
-
-env = make_env(env_name, robot=walker)
-s = env.reset()
-
-# Evaluation
-env = make_env(env_name, robot=walker)
-reward = evaluate(a, env, render=True)
-print(f"Reward: {reward}")
-env.close()
-
-def mp_eval(a, cfg):
+def mp_eval(agent_genes, cfg, device_str):
+    """Worker function for parallel evaluation of one agent."""
+    if device_str == "cuda" and torch.cuda.is_available():
+        torch.cuda.set_device(0)
+    agent = Agent(Network, cfg, genes=agent_genes)
     env = make_env(cfg["env_name"], robot=cfg["robot"])
-    fit = evaluate(a, env, max_steps=cfg["max_steps"])
+    fitness = evaluate(agent, env, max_steps=cfg["max_steps"])
     env.close()
-    return fit
+    return fitness
+
 
 def ES(config):
-    cfg = get_cfg(config["env_name"], robot=config["robot"]) # Get network dims
-    cfg = {**config, **cfg} # Merge configs
+    """Run (μ,λ)-Evolution Strategies with momentum and adaptive sigma."""
+    cfg = get_cfg(config["env_name"], robot=config["robot"])
+    cfg = {**config, **cfg}
+    cfg.setdefault("use_layernorm", True)
 
-    # Update weights
     mu = cfg["mu"]
-    w = np.array([np.log(mu + 0.5) - np.log(i)
-                          for i in range(1, mu + 1)])
+    lambda_ = cfg["lambda"]
+    sigma = cfg["sigma"]
+    lr = cfg.get("lr", 1.0)
+    momentum = 0.9
+    sigma_lr = 0.01
+    target_success_rate = 0.1
+    param_clip = 5.0
+
+    w = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
     w /= np.sum(w)
 
-    env = make_env(cfg["env_name"], robot=cfg["robot"])
-
-    # Center of the distribution
     elite = Agent(Network, cfg)
     elite.fitness = -np.inf
     theta = elite.genes
     d = len(theta)
+    velocity = np.zeros(d)
 
     fits = []
     total_evals = []
+    sigma_history = []
+
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    num_workers = mp.cpu_count() - 1
+    pool = mp.Pool(processes=num_workers)
 
     bar = tqdm(range(cfg["generations"]))
     for gen in bar:
-        population = []
-        for i in range(cfg["lambda"]):
-            genes = theta + np.random.randn(len(theta)) * cfg["sigma"]
-            ind = Agent(Network, cfg, genes=genes)
-            # ind.fitness = evaluate(ind, env, max_steps=cfg["max_steps"])
-            population.append(ind)
+        half_lambda = lambda_ // 2
+        population_genes = []
+        perturbations = []
+        for _ in range(half_lambda):
+            eps = np.random.randn(d)
+            perturbations.append(eps)
+            population_genes.append(theta + sigma * eps)
+            population_genes.append(theta - sigma * eps)
+        if lambda_ % 2 == 1:
+            population_genes.append(theta + sigma * np.random.randn(d))
 
-        # with Pool(processes=len(population)) as pool:
-        #     pop_fitness = pool.starmap(mp_eval, [(a, cfg) for a in population])
+        args = [(genes, cfg, device_str) for genes in population_genes]
+        pop_fitness = pool.starmap(mp_eval, args)
 
-        pop_fitness = [evaluate(a, env, max_steps=cfg["max_steps"]) for a in population]
+        best_idx = np.argmax(pop_fitness)
+        if pop_fitness[best_idx] > elite.fitness:
+            elite.genes = population_genes[best_idx]
+            elite.fitness = pop_fitness[best_idx]
 
-        for i in range(len(population)):
-            population[i].fitness = pop_fitness[i]
+        ranks = np.argsort(np.argsort(pop_fitness)[::-1]) + 1
+        shaped_fitness = 1.0 / ranks
 
-        # sort by fitness
-        inv_fitnesses = [- f for f in pop_fitness]
-        # indices from highest fitness to lowest
-        idx = np.argsort(inv_fitnesses)
-
+        sorted_indices = np.argsort(pop_fitness)[::-1]
         step = np.zeros(d)
         for i in range(mu):
-            # update step
-            step = step + w[i] * (population[idx[i]].genes - theta)
-        # update theta
-        theta = theta + step * cfg["lr"]
+            idx = sorted_indices[i]
+            if idx < 2 * half_lambda:
+                pair_idx = idx // 2
+                eps = perturbations[pair_idx]
+                direction = eps if idx % 2 == 0 else -eps
+            else:
+                direction = (population_genes[idx] - theta) / sigma
+            step += w[i] * direction * shaped_fitness[idx]
+        step /= np.sum(w[:mu] * shaped_fitness[sorted_indices[:mu]])
 
-        if pop_fitness[idx[0]] > elite.fitness:
-            elite.genes = population[idx[0]].genes
-            elite.fitness = pop_fitness[idx[0]]
+        velocity = momentum * velocity + lr * step
+        velocity = np.clip(velocity, -param_clip, param_clip)
+        theta = theta + sigma * velocity
+
+        baseline = elite.fitness
+        success_count = sum(f > baseline for f in pop_fitness)
+        success_rate = success_count / lambda_
+
+        if success_rate > target_success_rate:
+            sigma *= np.exp(sigma_lr)
+        else:
+            sigma /= np.exp(sigma_lr)
+        sigma = np.clip(sigma, 0.01, 1.0)
 
         fits.append(elite.fitness)
-        total_evals.append(len(population) * (gen+1))
+        total_evals.append(lambda_ * (gen + 1))
+        sigma_history.append(sigma)
+        bar.set_description(f"Best: {elite.fitness:.2f} | σ: {sigma:.3f} | succ: {success_rate:.2f}")
 
-        bar.set_description(f"Best: {elite.fitness}")
+    pool.close()
+    pool.join()
 
-    env.close()
-    plt.plot(total_evals, fits)
-    plt.xlabel("Evaluations")
-    plt.ylabel("Fitness")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+    ax1.plot(total_evals, fits)
+    ax1.set_xlabel("Evaluations")
+    ax1.set_ylabel("Fitness")
+    ax2.plot(total_evals, sigma_history)
+    ax2.set_xlabel("Evaluations")
+    ax2.set_ylabel("Mutation σ")
+    plt.tight_layout()
     plt.show()
+
     return elite
 
-config = {
-    "env_name": "Walker-v0",
-    "robot": walker,
-    "generations": 50, # to change: increase!
-    "lambda": 20, # Population size
-    "mu": 10, # Parents pop size
-    "sigma": 0.1, # mutation std
-    "lr": 1, # Learning rate
-    "max_steps": 500, # to change to 500
-}
 
-a = ES(config)
-env = make_env(config["env_name"], robot=config["robot"], render_mode="rgb_array")
-env.metadata.update({'render_modes': ["rgb_array"]})
-a.fitness, imgs = evaluate(a, env, render=True)
-env.close()
-print(a.fitness)
-imageio.mimsave(f'Walker.gif', imgs, duration=(1/50.0))
+if __name__ == "__main__":
+    config = {
+        "env_name": "Climber-v2",
+        "robot": robot_config,
+        "generations": 100,
+        "lambda": 100,
+        "mu": 50,
+        "sigma": 0.4,
+        "lr": 0.1,
+        "max_steps": 500,
+        "use_layernorm": False,
+    }
+
+    elite_agent = ES(config)
+
+    env = make_env(config["env_name"], robot=config["robot"], render_mode="rgb_array")
+    env.metadata['render_fps'] = 30
+    fitness, imgs = evaluate(elite_agent, env, max_steps=500, render=True)
+    env.close()
+    print(f"Final fitness: {fitness}")
+    imageio.mimsave('Thrower.gif', imgs, duration=(1/30.0))

@@ -1,4 +1,9 @@
 *
+!Evolution exemple
+!Evolution exemple/Thrower/*
+!Evolution exemple/Walker/*
+
+!.gitignore
 !evogym.ipynb
 !gif.ipynb
 !main.py
