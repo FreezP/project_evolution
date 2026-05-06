@@ -328,7 +328,7 @@ if __name__ == "__main__":
         "lr": 0.1,
         "max_steps": 500,
         "use_layernorm": False,
-        "csv_filename": "fitness_log_Thrower3.csv",
+        "csv_filename": "fitness_log_Climber3.csv",
     }
 
     elite_agent = ES(config)
