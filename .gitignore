@@ -2,6 +2,7 @@
 !Evolution exemple
 !Evolution exemple/Thrower/*
 !Evolution exemple/Walker/*
+!Evolution exemple/Climber/*
 
 !.gitignore
 !evogym.ipynb
