@@ -16,6 +16,8 @@ from evogym.utils import get_full_connectivity
 from tqdm import tqdm
 import imageio
 import multiprocessing as mp
+import csv
+import os
 
 
 class Network(nn.Module):
@@ -107,11 +109,11 @@ class Agent:
 
 
 robot_config = np.array([
-    [1, 3, 3, 3, 1],
-    [4, 4, 1, 4, 4],
-    [0, 4, 2, 4, 0],
-    [4, 4, 2, 4, 4],
-    [4, 3, 3, 3, 4]
+    [0, 0, 1, 1, 1],
+    [1, 0, 4, 4, 4],
+    [4, 0, 4, 4, 4],
+    [4, 0, 4, 4, 4],
+    [3, 3, 3, 1, 1]
 ])
 
 'Walker:'
@@ -132,6 +134,14 @@ robot_config = np.array([
     [3, 3, 3, 1, 1]
 ])'''
 
+'Climber:'
+''' np.array([
+    [1, 3, 3, 3, 1],
+    [1, 3, 3, 3, 1],
+    [0, 4, 4, 4, 0],
+    [1, 3, 4, 3, 1],
+    [1, 3, 1, 3, 1]
+])'''
 
 def make_env(env_name, seed=None, robot=None, **kwargs):
     """Create an Evolution Gym environment, optionally with a custom robot body."""
@@ -201,7 +211,7 @@ def ES(config):
     sigma = cfg["sigma"]
     lr = cfg.get("lr", 1.0)
     momentum = 0.9
-    sigma_lr = 0.01
+    sigma_lr = 0.1
     target_success_rate = 0.1
     param_clip = 5.0
 
@@ -222,61 +232,72 @@ def ES(config):
     num_workers = mp.cpu_count() - 1
     pool = mp.Pool(processes=num_workers)
 
-    bar = tqdm(range(cfg["generations"]))
-    for gen in bar:
-        half_lambda = lambda_ // 2
-        population_genes = []
-        perturbations = []
-        for _ in range(half_lambda):
-            eps = np.random.randn(d)
-            perturbations.append(eps)
-            population_genes.append(theta + sigma * eps)
-            population_genes.append(theta - sigma * eps)
-        if lambda_ % 2 == 1:
-            population_genes.append(theta + sigma * np.random.randn(d))
+    csv_filename = config.get("csv_filename", "fitness_log.csv")
 
-        args = [(genes, cfg, device_str) for genes in population_genes]
-        pop_fitness = pool.starmap(mp_eval, args)
+    with open(csv_filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["evaluations", "fitness", "sigma"])
 
-        best_idx = np.argmax(pop_fitness)
-        if pop_fitness[best_idx] > elite.fitness:
-            elite.genes = population_genes[best_idx]
-            elite.fitness = pop_fitness[best_idx]
+        bar = tqdm(range(cfg["generations"]))
+        for gen in bar:
+            half_lambda = lambda_ // 2
+            population_genes = []
+            perturbations = []
+            for _ in range(half_lambda):
+                eps = np.random.randn(d)
+                perturbations.append(eps)
+                population_genes.append(theta + sigma * eps)
+                population_genes.append(theta - sigma * eps)
+            if lambda_ % 2 == 1:
+                population_genes.append(theta + sigma * np.random.randn(d))
 
-        ranks = np.argsort(np.argsort(pop_fitness)[::-1]) + 1
-        shaped_fitness = 1.0 / ranks
+            args = [(genes, cfg, device_str) for genes in population_genes]
+            pop_fitness = pool.starmap(mp_eval, args)
 
-        sorted_indices = np.argsort(pop_fitness)[::-1]
-        step = np.zeros(d)
-        for i in range(mu):
-            idx = sorted_indices[i]
-            if idx < 2 * half_lambda:
-                pair_idx = idx // 2
-                eps = perturbations[pair_idx]
-                direction = eps if idx % 2 == 0 else -eps
+            best_idx = np.argmax(pop_fitness)
+            if pop_fitness[best_idx] > elite.fitness:
+                elite.genes = population_genes[best_idx]
+                elite.fitness = pop_fitness[best_idx]
+
+            ranks = np.argsort(np.argsort(pop_fitness)[::-1]) + 1
+            shaped_fitness = 1.0 / ranks
+
+            sorted_indices = np.argsort(pop_fitness)[::-1]
+            step = np.zeros(d)
+            for i in range(mu):
+                idx = sorted_indices[i]
+                if idx < 2 * half_lambda:
+                    pair_idx = idx // 2
+                    eps = perturbations[pair_idx]
+                    direction = eps if idx % 2 == 0 else -eps
+                else:
+                    direction = (population_genes[idx] - theta) / sigma
+                step += w[i] * direction * shaped_fitness[idx]
+            step /= np.sum(w[:mu] * shaped_fitness[sorted_indices[:mu]])
+
+            velocity = momentum * velocity + lr * step
+            velocity = np.clip(velocity, -param_clip, param_clip)
+            theta = theta + sigma * velocity
+
+            baseline = elite.fitness
+            success_count = sum(f > baseline for f in pop_fitness)
+            success_rate = success_count / lambda_
+
+            if success_rate > target_success_rate:
+                sigma *= np.exp(sigma_lr)
             else:
-                direction = (population_genes[idx] - theta) / sigma
-            step += w[i] * direction * shaped_fitness[idx]
-        step /= np.sum(w[:mu] * shaped_fitness[sorted_indices[:mu]])
+                sigma /= np.exp(sigma_lr)
+            sigma = np.clip(sigma, 0.01, 1.0)
 
-        velocity = momentum * velocity + lr * step
-        velocity = np.clip(velocity, -param_clip, param_clip)
-        theta = theta + sigma * velocity
+            fits.append(elite.fitness)
+            current_evals = lambda_ * (gen + 1)
+            total_evals.append(current_evals)
+            sigma_history.append(sigma)
 
-        baseline = elite.fitness
-        success_count = sum(f > baseline for f in pop_fitness)
-        success_rate = success_count / lambda_
+            writer.writerow([current_evals, elite.fitness, sigma])
+            csvfile.flush()
 
-        if success_rate > target_success_rate:
-            sigma *= np.exp(sigma_lr)
-        else:
-            sigma /= np.exp(sigma_lr)
-        sigma = np.clip(sigma, 0.01, 1.0)
-
-        fits.append(elite.fitness)
-        total_evals.append(lambda_ * (gen + 1))
-        sigma_history.append(sigma)
-        bar.set_description(f"Best: {elite.fitness:.2f} | σ: {sigma:.3f} | succ: {success_rate:.2f}")
+            bar.set_description(f"Best: {elite.fitness:.2f} | σ: {sigma:.3f} | succ: {success_rate:.2f}")
 
     pool.close()
     pool.join()
@@ -291,20 +312,23 @@ def ES(config):
     plt.tight_layout()
     plt.show()
 
+    print(f"Fitness log saved to: {csv_filename}")
+
     return elite
 
 
 if __name__ == "__main__":
     config = {
-        "env_name": "Climber-v2",
+        "env_name": "Thrower-v0",
         "robot": robot_config,
-        "generations": 100,
-        "lambda": 100,
-        "mu": 50,
-        "sigma": 0.4,
+        "generations": 50,
+        "lambda": 400,
+        "mu": 200,
+        "sigma": 0.8,
         "lr": 0.1,
-        "max_steps": 500,
+        "max_steps": 250,
         "use_layernorm": False,
+        "csv_filename": "fitness_log_Thrower1.csv",
     }
 
     elite_agent = ES(config)
@@ -314,4 +338,4 @@ if __name__ == "__main__":
     fitness, imgs = evaluate(elite_agent, env, max_steps=500, render=True)
     env.close()
     print(f"Final fitness: {fitness}")
-    imageio.mimsave('Thrower.gif', imgs, duration=(1/30.0))
+    imageio.mimsave('Thrower1.gif', imgs, duration=(1/30.0))
