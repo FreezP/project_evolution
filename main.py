@@ -109,11 +109,11 @@ class Agent:
 
 
 robot_config = np.array([
-    [0, 0, 1, 1, 1],
-    [1, 0, 4, 4, 4],
-    [4, 0, 4, 4, 4],
-    [4, 0, 4, 4, 4],
-    [3, 3, 3, 1, 1]
+    [0, 3, 3, 3, 0],
+    [4, 4, 4, 4, 4],
+    [0, 4, 4, 4, 0],
+    [0, 4, 4, 4, 0],
+    [3, 3, 1, 3, 3]
 ])
 
 'Walker:'
@@ -319,16 +319,16 @@ def ES(config):
 
 if __name__ == "__main__":
     config = {
-        "env_name": "Thrower-v0",
+        "env_name": "Climber-v2",
         "robot": robot_config,
         "generations": 50,
-        "lambda": 400,
-        "mu": 200,
+        "lambda": 200,
+        "mu": 100,
         "sigma": 0.8,
         "lr": 0.1,
-        "max_steps": 250,
+        "max_steps": 500,
         "use_layernorm": False,
-        "csv_filename": "fitness_log_Thrower1.csv",
+        "csv_filename": "fitness_log_Thrower3.csv",
     }
 
     elite_agent = ES(config)
@@ -338,4 +338,4 @@ if __name__ == "__main__":
     fitness, imgs = evaluate(elite_agent, env, max_steps=500, render=True)
     env.close()
     print(f"Final fitness: {fitness}")
-    imageio.mimsave('Thrower1.gif', imgs, duration=(1/30.0))
+    imageio.mimsave('Climber.gif', imgs, duration=(1/30.0))
