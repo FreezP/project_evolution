@@ -212,7 +212,6 @@ def ES(config):
     lr = cfg.get("lr", 1.0)
     momentum = 0.9
     sigma_lr = 0.1
-    target_success_rate = 0.1
     param_clip = 5.0
 
     w = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
@@ -283,10 +282,8 @@ def ES(config):
             success_count = sum(f > baseline for f in pop_fitness)
             success_rate = success_count / lambda_
 
-            if success_rate > target_success_rate:
-                sigma *= np.exp(sigma_lr)
-            else:
-                sigma /= np.exp(sigma_lr)
+
+            sigma /= np.exp(sigma_lr)
             sigma = np.clip(sigma, 0.01, 1.0)
 
             fits.append(elite.fitness)
